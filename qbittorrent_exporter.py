@@ -1,5 +1,8 @@
 import argparse
+import collections
+
 import flask
+import prometheus_client
 import requests
 
 app = flask.Flask(__name__)
@@ -40,9 +43,46 @@ class QBittorrentApi:
         return r.json()
 
 
+qbittorrent_peers_blocked = prometheus_client.Gauge('qbittorrent_peers_blocked')
+qbittorrent_status = prometheus_client.Enum('qbittorrent_status', states=['connected', 'firewalled', 'disconnected'])
+qbittorrent_dht_nodes = prometheus_client.Gauge('qbittorrent_dht_nodes')
+qbittorrent_dl_info_data = prometheus_client.Gauge('qbittorrent_dl_info_data')
+qbittorrent_dl_info_speed = prometheus_client.Gauge('qbittorrent_dl_info_speed')
+qbittorrent_up_info_data = prometheus_client.Gauge('qbittorrent_up_info_data')
+qbittorrent_up_info_speed = prometheus_client.Gauge('qbittorrent_up_info_speed')
+TORRENT_STATES = ['error', 'pausedUP', 'pausedDL', 'queuedUP', 'queuedDL', 'uploading', 'stalledUP', 'checkingUP',
+                  'checkingDL', 'downloading', 'stalledDL', 'metaDL']
+qbittorrent_torrent_state = prometheus_client.Gauge('qbittorrent_torrent_state', labelnames=('state',))
+
+
+def get_blocked_peers(api: QBittorrentApi):
+    n = 0
+    for peer_log in api.peer_log():
+        if peer_log['blocked']:
+            n += 1
+    return n
+
+
 @app.route("/metrics")
 def metrics():
-    return "Hello World!"
+    api: QBittorrentApi = app.config['api']
+
+    qbittorrent_peers_blocked.set(get_blocked_peers(api))
+
+    transfer_info = api.transfer_info()
+    qbittorrent_status.state(transfer_info['connection_status'])
+    qbittorrent_dht_nodes.set(transfer_info['dht_nodes'])
+    qbittorrent_dl_info_data.set(transfer_info['dl_info_data'])
+    qbittorrent_dl_info_speed.set(transfer_info['dl_info_speed'])
+    qbittorrent_up_info_data.set(transfer_info['up_info_data'])
+    qbittorrent_up_info_speed.set(transfer_info['up_info_speed'])
+
+    torrents_info = api.torrents_info()
+    c = collections.Counter((t['state'] for t in torrents_info))
+    for state in TORRENT_STATES:
+        qbittorrent_torrent_state.labels(state=state).set(c.get(state, 0))
+
+    return prometheus_client.generate_latest()
 
 
 def main():
